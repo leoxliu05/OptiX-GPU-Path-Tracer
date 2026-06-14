@@ -36,11 +36,16 @@ An optional second argument overrides the output path:
 .\build\optix_path_tracer.exe scene.json output.ppm
 ```
 
+Rendered images are organized by scene under `output/`. For example, the
+bundled scene writes to `output/cornellbox/cornellbox.ppm`. Missing output
+directories are created automatically.
+
 ## Scene Format
 
 See `model/cornellbox/scene.json` for a complete example. A scene contains:
 
 - `renderer`: resolution, samples per pixel, maximum depth, seed, and output
+  path such as `output/cornellbox/cornellbox.ppm`
 - `camera`: position, target, up vector, and vertical field of view
 - `environmentColor`: radiance returned by miss rays
 - `rootTransform`: scale and translation applied to all meshes

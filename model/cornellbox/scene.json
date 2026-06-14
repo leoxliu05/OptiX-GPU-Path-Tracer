@@ -5,7 +5,7 @@
     "samplesPerPixel": 512,
     "maxDepth": 8,
     "seed": 305419896,
-    "output": "cornellbox.ppm"
+    "output": "output/cornellbox/cornellbox.ppm"
   },
   "camera": {
     "position": [0.0, 0.0, -8.1],

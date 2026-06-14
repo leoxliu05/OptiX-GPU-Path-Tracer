@@ -10,6 +10,19 @@ void writePpm(
     unsigned int height
 )
 {
+    const std::filesystem::path outputDirectory = outputPath.parent_path();
+    if (!outputDirectory.empty()) {
+        std::error_code directoryError;
+        std::filesystem::create_directories(outputDirectory, directoryError);
+        if (directoryError) {
+            throw std::runtime_error(
+                "Could not create output directory: "
+                + outputDirectory.string()
+                + " (" + directoryError.message() + ')'
+            );
+        }
+    }
+
     std::ofstream output(outputPath, std::ios::binary);
     if (!output) {
         throw std::runtime_error(
