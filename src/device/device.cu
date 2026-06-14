@@ -84,6 +84,16 @@ static __forceinline__ __device__ float3 zeroVector()
     return make_float3(0.0f, 0.0f, 0.0f);
 }
 
+static __forceinline__ __device__ float powerHeuristic(
+    float firstPdf,
+    float secondPdf
+)
+{
+    const float firstSquared = firstPdf * firstPdf;
+    const float secondSquared = secondPdf * secondPdf;
+    return firstSquared / fmaxf(firstSquared + secondSquared, 1.0e-20f);
+}
+
 static __forceinline__ __device__ unsigned int hash(unsigned int value)
 {
     value ^= value >> 16;
@@ -298,16 +308,47 @@ static __forceinline__ __device__ float3 estimateDirectLighting(
         return zeroVector();
     }
 
-    // The requested estimator uses a uniform area PDF. Lambertian BRDF is
-    // albedo / pi, and the two cosine terms plus inverse-square distance convert
-    // emitted radiance at the sampled light point into incident contribution.
-    const float lightPdf = 1.0f / params.totalLightArea;
+    // Convert the uniform area PDF to solid angle before comparing it with the
+    // cosine-weighted Lambertian sampling PDF.
+    const float lightAreaPdf = 1.0f / params.totalLightArea;
+    const float lightDirectionPdf =
+        lightAreaPdf * distanceSquared / lightCosine;
+    const float brdfDirectionPdf = surfaceCosine / pi;
+    const float misWeight = powerHeuristic(
+        lightDirectionPdf,
+        brdfDirectionPdf
+    );
     const float geometryTerm =
         surfaceCosine * lightCosine / distanceSquared;
     return scale(
         multiply(albedo, light.emission),
-        geometryTerm / (pi * lightPdf)
+        misWeight * geometryTerm / (pi * lightAreaPdf)
     );
+}
+
+static __forceinline__ __device__ float lightDirectionPdfForHit(
+    float3 previousPosition,
+    float3 lightPosition,
+    float3 lightNormal,
+    float3 rayDirection
+)
+{
+    if (params.totalLightArea <= 0.0f) {
+        return 0.0f;
+    }
+
+    const float3 toLight = subtract(lightPosition, previousPosition);
+    const float distanceSquared = dot(toLight, toLight);
+    const float lightCosine = fmaxf(
+        dot(lightNormal, scale(rayDirection, -1.0f)),
+        0.0f
+    );
+    if (lightCosine <= 0.0f) {
+        return 0.0f;
+    }
+
+    const float lightAreaPdf = 1.0f / params.totalLightArea;
+    return lightAreaPdf * distanceSquared / lightCosine;
 }
 
 static __forceinline__ __device__ float3 toneMap(float3 color)
@@ -366,6 +407,8 @@ extern "C" __global__ void __raygen__render()
         float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
         float3 directRadiance = zeroVector();
         float3 indirectRadiance = zeroVector();
+        float3 previousSurfacePosition = zeroVector();
+        float previousBrdfPdf = 0.0f;
 
         // Each loop iteration traces one path segment. Keeping the loop here
         // means the OptiX pipeline itself only requires a trace depth of one.
@@ -394,14 +437,47 @@ extern "C" __global__ void __raygen__render()
             }
 
             if (largestComponent(payload.material.emission) > 0.0f) {
-                // Without MIS, only camera-visible emission is accumulated here.
-                // Diffuse paths reaching a light are already represented by the
-                // explicit area-light sample taken at the previous surface.
+                const float emissionCosine = dot(
+                    payload.normal,
+                    scale(rayDirection, -1.0f)
+                );
+                if (emissionCosine <= 0.0f) {
+                    break;
+                }
+
+                // Camera-visible emission has no competing sampling strategy.
+                // Later light hits are weighted against explicit light sampling.
                 if (depth == 0) {
                     directRadiance = add(
                         directRadiance,
                         multiply(throughput, payload.material.emission)
                     );
+                } else {
+                    const float lightPdf = lightDirectionPdfForHit(
+                        previousSurfacePosition,
+                        payload.position,
+                        payload.normal,
+                        rayDirection
+                    );
+                    const float misWeight = powerHeuristic(
+                        previousBrdfPdf,
+                        lightPdf
+                    );
+                    const float3 emittedContribution = scale(
+                        multiply(throughput, payload.material.emission),
+                        misWeight
+                    );
+                    if (depth == 1) {
+                        directRadiance = add(
+                            directRadiance,
+                            emittedContribution
+                        );
+                    } else {
+                        indirectRadiance = add(
+                            indirectRadiance,
+                            emittedContribution
+                        );
+                    }
                 }
                 break;
             }
@@ -430,8 +506,13 @@ extern "C" __global__ void __raygen__render()
 
             // Offset the next origin to avoid immediately hitting the same
             // triangle because of floating-point intersection error.
+            previousSurfacePosition = payload.position;
             rayOrigin = add(payload.position, scale(surfaceNormal, 0.001f));
             rayDirection = sampleCosineHemisphere(surfaceNormal, randomState);
+            previousBrdfPdf = fmaxf(
+                dot(surfaceNormal, rayDirection),
+                0.0f
+            ) / pi;
 
             if (depth >= 3) {
                 // Russian roulette terminates low-throughput paths without

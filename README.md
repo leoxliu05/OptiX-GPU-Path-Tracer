@@ -10,6 +10,7 @@ dimensions, sampling, and output paths are configured in JSON.
 - Cosine-weighted Lambertian scattering
 - Emissive triangle meshes
 - Uniform area-light sampling with shadow rays
+- Power-heuristic MIS between light and Lambertian BRDF sampling
 - Separate direct and indirect radiance accumulation
 - Russian roulette path termination
 - OBJ mesh loading
@@ -17,8 +18,9 @@ dimensions, sampling, and output paths are configured in JSON.
 - Per-material OptiX SBT records
 - ACES tone mapping and PPM output
 
-Area-light samples use the area-domain PDF `1 / totalLightArea`. Cook-Torrance,
-GGX, and MIS are intentionally not part of this baseline.
+Area-light samples begin with the area-domain PDF `1 / totalLightArea`, which is
+converted to a solid-angle PDF for MIS. Cook-Torrance and GGX are intentionally
+not part of this baseline.
 
 ## Build and Run
 
