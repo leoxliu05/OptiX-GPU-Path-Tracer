@@ -13,6 +13,17 @@ struct materialData
     float3 emission;
 };
 
+// One emissive triangle sampled uniformly in area for direct lighting.
+struct areaLightData
+{
+    float3 firstVertex;
+    float3 secondVertex;
+    float3 thirdVertex;
+    float3 normal;
+    float3 emission;
+    float area;
+};
+
 // Per-material data attached to an OptiX hit-group SBT record.
 struct hitGroupData
 {
@@ -34,5 +45,8 @@ struct launchParams
     float3 cameraV;
     float3 cameraW;
     float3 environmentColor;
+    const areaLightData* lights;
+    unsigned int lightCount;
+    float totalLightArea;
     OptixTraversableHandle traversable;
 };

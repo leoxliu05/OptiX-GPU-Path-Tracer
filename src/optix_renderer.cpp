@@ -43,8 +43,10 @@ struct optixResources
     OptixDeviceContext context = nullptr;
     OptixModule module = nullptr;
     OptixProgramGroup raygenGroup = nullptr;
-    OptixProgramGroup missGroup = nullptr;
-    OptixProgramGroup hitGroup = nullptr;
+    OptixProgramGroup radianceMissGroup = nullptr;
+    OptixProgramGroup shadowMissGroup = nullptr;
+    OptixProgramGroup radianceHitGroup = nullptr;
+    OptixProgramGroup shadowHitGroup = nullptr;
     OptixPipeline pipeline = nullptr;
 
     ~optixResources()
@@ -52,11 +54,17 @@ struct optixResources
         if (pipeline != nullptr) {
             optixPipelineDestroy(pipeline);
         }
-        if (hitGroup != nullptr) {
-            optixProgramGroupDestroy(hitGroup);
+        if (shadowHitGroup != nullptr) {
+            optixProgramGroupDestroy(shadowHitGroup);
         }
-        if (missGroup != nullptr) {
-            optixProgramGroupDestroy(missGroup);
+        if (radianceHitGroup != nullptr) {
+            optixProgramGroupDestroy(radianceHitGroup);
+        }
+        if (shadowMissGroup != nullptr) {
+            optixProgramGroupDestroy(shadowMissGroup);
+        }
+        if (radianceMissGroup != nullptr) {
+            optixProgramGroupDestroy(radianceMissGroup);
         }
         if (raygenGroup != nullptr) {
             optixProgramGroupDestroy(raygenGroup);
@@ -179,7 +187,8 @@ void createPipeline(optixResources& resources, const std::string& ptx)
         ptx
     );
 
-    // Register the three device entry points used by the single radiance ray type.
+    // Register radiance programs and lightweight shadow programs as separate
+    // ray types. Shadow rays only need miss and any-hit behavior.
     OptixProgramGroupDesc raygenDescription{};
     raygenDescription.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
     raygenDescription.raygen.module = resources.module;
@@ -193,24 +202,44 @@ void createPipeline(optixResources& resources, const std::string& ptx)
     missDescription.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
     missDescription.miss.module = resources.module;
     missDescription.miss.entryFunctionName = "__miss__radiance";
-    resources.missGroup = createProgramGroup(
+    resources.radianceMissGroup = createProgramGroup(
         resources.context,
         missDescription
+    );
+
+    OptixProgramGroupDesc shadowMissDescription{};
+    shadowMissDescription.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
+    shadowMissDescription.miss.module = resources.module;
+    shadowMissDescription.miss.entryFunctionName = "__miss__shadow";
+    resources.shadowMissGroup = createProgramGroup(
+        resources.context,
+        shadowMissDescription
     );
 
     OptixProgramGroupDesc hitDescription{};
     hitDescription.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
     hitDescription.hitgroup.moduleCH = resources.module;
     hitDescription.hitgroup.entryFunctionNameCH = "__closesthit__radiance";
-    resources.hitGroup = createProgramGroup(
+    resources.radianceHitGroup = createProgramGroup(
         resources.context,
         hitDescription
     );
 
-    const std::array<OptixProgramGroup, 3> groups{
+    OptixProgramGroupDesc shadowHitDescription{};
+    shadowHitDescription.kind = OPTIX_PROGRAM_GROUP_KIND_HITGROUP;
+    shadowHitDescription.hitgroup.moduleAH = resources.module;
+    shadowHitDescription.hitgroup.entryFunctionNameAH = "__anyhit__shadow";
+    resources.shadowHitGroup = createProgramGroup(
+        resources.context,
+        shadowHitDescription
+    );
+
+    const std::array<OptixProgramGroup, 5> groups{
         resources.raygenGroup,
-        resources.missGroup,
-        resources.hitGroup
+        resources.radianceMissGroup,
+        resources.shadowMissGroup,
+        resources.radianceHitGroup,
+        resources.shadowHitGroup
     };
 
     // Paths are iterated inside raygen, so each optixTrace call only needs one
@@ -272,6 +301,7 @@ void createPipeline(optixResources& resources, const std::string& ptx)
 launchParams createLaunchParams(
     const sceneData& scene,
     uchar4* image,
+    const areaLightData* lights,
     OptixTraversableHandle traversable
 )
 {
@@ -307,6 +337,9 @@ launchParams createLaunchParams(
     parameters.cameraV = multiply(cameraUp, verticalScale);
     parameters.cameraW = cameraForward;
     parameters.environmentColor = scene.environmentColor;
+    parameters.lights = lights;
+    parameters.lightCount = static_cast<unsigned int>(scene.lights.size());
+    parameters.totalLightArea = scene.totalLightArea;
     parameters.traversable = traversable;
     return parameters;
 }
@@ -430,32 +463,56 @@ renderResult renderScene(
     // Raygen and miss records only identify programs. Hit records additionally
     // bind the shared vertex buffer and one material to the closest-hit program.
     sbtRecord<emptySbtData> raygenRecord{};
-    sbtRecord<emptySbtData> missRecord{};
+    std::array<sbtRecord<emptySbtData>, 2> missRecords{};
     checkOptix(
         optixSbtRecordPackHeader(resources.raygenGroup, &raygenRecord),
         "pack raygen SBT record"
     );
     checkOptix(
-        optixSbtRecordPackHeader(resources.missGroup, &missRecord),
-        "pack miss SBT record"
+        optixSbtRecordPackHeader(
+            resources.radianceMissGroup,
+            &missRecords[0]
+        ),
+        "pack radiance miss SBT record"
+    );
+    checkOptix(
+        optixSbtRecordPackHeader(
+            resources.shadowMissGroup,
+            &missRecords[1]
+        ),
+        "pack shadow miss SBT record"
     );
 
-    std::vector<sbtRecord<hitGroupData>> hitRecords(scene.materials.size());
-    for (std::size_t index = 0; index < hitRecords.size(); ++index) {
+    std::vector<sbtRecord<hitGroupData>> hitRecords(
+        scene.materials.size() * 2
+    );
+    for (std::size_t index = 0; index < scene.materials.size(); ++index) {
+        const std::size_t radianceRecordIndex = index * 2;
+        const std::size_t shadowRecordIndex = radianceRecordIndex + 1;
         checkOptix(
-            optixSbtRecordPackHeader(resources.hitGroup, &hitRecords[index]),
-            "pack hit group SBT record"
+            optixSbtRecordPackHeader(
+                resources.radianceHitGroup,
+                &hitRecords[radianceRecordIndex]
+            ),
+            "pack radiance hit-group SBT record"
         );
-        hitRecords[index].data.vertices = deviceVertices.data();
-        hitRecords[index].data.material = scene.materials[index];
+        checkOptix(
+            optixSbtRecordPackHeader(
+                resources.shadowHitGroup,
+                &hitRecords[shadowRecordIndex]
+            ),
+            "pack shadow hit-group SBT record"
+        );
+        hitRecords[radianceRecordIndex].data.vertices = deviceVertices.data();
+        hitRecords[radianceRecordIndex].data.material = scene.materials[index];
     }
 
     // SBT records must live in device memory for the duration of optixLaunch.
     cudaBuffer<sbtRecord<emptySbtData>> deviceRaygenRecord;
-    cudaBuffer<sbtRecord<emptySbtData>> deviceMissRecord;
+    cudaBuffer<sbtRecord<emptySbtData>> deviceMissRecords;
     cudaBuffer<sbtRecord<hitGroupData>> deviceHitRecords;
     deviceRaygenRecord.allocate(1);
-    deviceMissRecord.allocate(1);
+    deviceMissRecords.allocate(missRecords.size());
     deviceHitRecords.allocate(hitRecords.size());
     checkCuda(
         cudaMemcpy(
@@ -468,12 +525,12 @@ renderResult renderScene(
     );
     checkCuda(
         cudaMemcpy(
-            deviceMissRecord.data(),
-            &missRecord,
-            sizeof(missRecord),
+            deviceMissRecords.data(),
+            missRecords.data(),
+            missRecords.size() * sizeof(sbtRecord<emptySbtData>),
             cudaMemcpyHostToDevice
         ),
-        "copy miss SBT record"
+        "copy miss SBT records"
     );
     checkCuda(
         cudaMemcpy(
@@ -488,17 +545,35 @@ renderResult renderScene(
     // The SBT connects the pipeline stages to the records selected by a trace.
     OptixShaderBindingTable shaderBindingTable{};
     shaderBindingTable.raygenRecord = deviceRaygenRecord.devicePointer();
-    shaderBindingTable.missRecordBase = deviceMissRecord.devicePointer();
-    shaderBindingTable.missRecordStrideInBytes = sizeof(missRecord);
-    shaderBindingTable.missRecordCount = 1;
+    shaderBindingTable.missRecordBase = deviceMissRecords.devicePointer();
+    shaderBindingTable.missRecordStrideInBytes =
+        sizeof(sbtRecord<emptySbtData>);
+    shaderBindingTable.missRecordCount =
+        static_cast<unsigned int>(missRecords.size());
     shaderBindingTable.hitgroupRecordBase = deviceHitRecords.devicePointer();
     shaderBindingTable.hitgroupRecordStrideInBytes =
         sizeof(sbtRecord<hitGroupData>);
     shaderBindingTable.hitgroupRecordCount =
         static_cast<unsigned int>(hitRecords.size());
 
-    // Allocate the output image and copy the camera, render settings, and GAS
-    // handle into the launch parameter block consumed by device.cu.
+    // Upload emissive triangles separately so raygen can sample their surfaces
+    // without searching the complete geometry buffer.
+    cudaBuffer<areaLightData> deviceLights;
+    if (!scene.lights.empty()) {
+        deviceLights.allocate(scene.lights.size());
+        checkCuda(
+            cudaMemcpy(
+                deviceLights.data(),
+                scene.lights.data(),
+                scene.lights.size() * sizeof(areaLightData),
+                cudaMemcpyHostToDevice
+            ),
+            "copy area lights"
+        );
+    }
+
+    // Allocate the output image and copy the camera, render settings, light
+    // list, and GAS handle into the parameter block consumed by device.cu.
     const std::size_t pixelCount =
         static_cast<std::size_t>(scene.renderer.width) * scene.renderer.height;
     cudaBuffer<uchar4> devicePixels;
@@ -506,6 +581,7 @@ renderResult renderScene(
     launchParams parameters = createLaunchParams(
         scene,
         devicePixels.data(),
+        deviceLights.data(),
         traversable
     );
     cudaBuffer<launchParams> deviceParameters;

@@ -39,4 +39,6 @@ struct sceneData
     std::vector<float3> vertices;
     std::vector<std::uint32_t> materialIndices;
     std::vector<materialData> materials;
+    std::vector<areaLightData> lights;
+    float totalLightArea = 0.0f;
 };

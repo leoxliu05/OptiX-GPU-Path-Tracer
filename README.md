@@ -9,14 +9,16 @@ dimensions, sampling, and output paths are configured in JSON.
 - Iterative diffuse path tracing on the GPU
 - Cosine-weighted Lambertian scattering
 - Emissive triangle meshes
+- Uniform area-light sampling with shadow rays
+- Separate direct and indirect radiance accumulation
 - Russian roulette path termination
 - OBJ mesh loading
 - JSON scene descriptions
 - Per-material OptiX SBT records
 - ACES tone mapping and PPM output
 
-Cook-Torrance, GGX, explicit light sampling, and MIS are intentionally not part
-of this baseline.
+Area-light samples use the area-domain PDF `1 / totalLightArea`. Cook-Torrance,
+GGX, and MIS are intentionally not part of this baseline.
 
 ## Build and Run
 

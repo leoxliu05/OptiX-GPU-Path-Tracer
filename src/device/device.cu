@@ -79,6 +79,11 @@ static __forceinline__ __device__ float largestComponent(float3 value)
     return fmaxf(value.x, fmaxf(value.y, value.z));
 }
 
+static __forceinline__ __device__ float3 zeroVector()
+{
+    return make_float3(0.0f, 0.0f, 0.0f);
+}
+
 static __forceinline__ __device__ unsigned int hash(unsigned int value)
 {
     value ^= value >> 16;
@@ -173,8 +178,8 @@ static __forceinline__ __device__ void traceRay(
     unsigned int secondPayload;
     packPointer(&payload, firstPayload, secondPayload);
 
-    // The SBT offset/stride/miss values select ray type zero. This renderer has
-    // a single radiance ray type and performs path iteration in raygen.
+    // Ray type zero is radiance. A stride of two skips the interleaved shadow
+    // record for each material.
     optixTrace(
         params.traversable,
         origin,
@@ -185,10 +190,123 @@ static __forceinline__ __device__ void traceRay(
         OptixVisibilityMask(255),
         OPTIX_RAY_FLAG_NONE,
         0,
-        1,
+        2,
         0,
         firstPayload,
         secondPayload
+    );
+}
+
+static __forceinline__ __device__ bool isVisible(
+    float3 origin,
+    float3 direction,
+    float maximumDistance
+)
+{
+    unsigned int visible = 1;
+
+    // Ray type one uses a minimal any-hit program. It clears the visibility
+    // payload and terminates as soon as any blocker is found.
+    optixTrace(
+        params.traversable,
+        origin,
+        direction,
+        0.001f,
+        maximumDistance,
+        0.0f,
+        OptixVisibilityMask(255),
+        OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT |
+            OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+        1,
+        2,
+        1,
+        visible
+    );
+    return visible != 0;
+}
+
+static __forceinline__ __device__ const areaLightData& selectAreaLight(
+    unsigned int& randomState
+)
+{
+    // Choosing a triangle in proportion to its area, followed by uniform point
+    // sampling on that triangle, is equivalent to sampling the union of all
+    // emissive triangles uniformly by area.
+    const float areaSample = randomFloat(randomState) * params.totalLightArea;
+    float accumulatedArea = 0.0f;
+    for (unsigned int index = 0; index < params.lightCount; ++index) {
+        accumulatedArea += params.lights[index].area;
+        if (areaSample <= accumulatedArea) {
+            return params.lights[index];
+        }
+    }
+    return params.lights[params.lightCount - 1];
+}
+
+static __forceinline__ __device__ float3 sampleTrianglePoint(
+    const areaLightData& light,
+    unsigned int& randomState
+)
+{
+    // The square root produces uniform area density over the triangle.
+    const float rootSample = sqrtf(randomFloat(randomState));
+    const float secondSample = randomFloat(randomState);
+    const float firstWeight = 1.0f - rootSample;
+    const float secondWeight = rootSample * (1.0f - secondSample);
+    const float thirdWeight = rootSample * secondSample;
+    return add(
+        add(
+            scale(light.firstVertex, firstWeight),
+            scale(light.secondVertex, secondWeight)
+        ),
+        scale(light.thirdVertex, thirdWeight)
+    );
+}
+
+static __forceinline__ __device__ float3 estimateDirectLighting(
+    float3 position,
+    float3 normal,
+    float3 albedo,
+    unsigned int& randomState
+)
+{
+    if (params.lightCount == 0 || params.totalLightArea <= 0.0f) {
+        return zeroVector();
+    }
+
+    const areaLightData& light = selectAreaLight(randomState);
+    const float3 lightPosition = sampleTrianglePoint(light, randomState);
+    const float3 toLight = subtract(lightPosition, position);
+    const float distanceSquared = dot(toLight, toLight);
+    if (distanceSquared <= 1.0e-8f) {
+        return zeroVector();
+    }
+
+    const float distance = sqrtf(distanceSquared);
+    if (distance <= 0.003f) {
+        return zeroVector();
+    }
+    const float3 lightDirection = scale(toLight, 1.0f / distance);
+    const float surfaceCosine = fmaxf(dot(normal, lightDirection), 0.0f);
+    const float lightCosine = fmaxf(dot(light.normal, scale(lightDirection, -1.0f)), 0.0f);
+    if (surfaceCosine <= 0.0f || lightCosine <= 0.0f) {
+        return zeroVector();
+    }
+
+    const float3 shadowOrigin = add(position, scale(normal, 0.001f));
+    if (!isVisible(shadowOrigin, lightDirection, distance - 0.002f)) {
+        return zeroVector();
+    }
+
+    // The requested estimator uses a uniform area PDF. Lambertian BRDF is
+    // albedo / pi, and the two cosine terms plus inverse-square distance convert
+    // emitted radiance at the sampled light point into incident contribution.
+    const float lightPdf = 1.0f / params.totalLightArea;
+    const float geometryTerm =
+        surfaceCosine * lightCosine / distanceSquared;
+    return scale(
+        multiply(albedo, light.emission),
+        geometryTerm / (pi * lightPdf)
     );
 }
 
@@ -246,7 +364,8 @@ extern "C" __global__ void __raygen__render()
             scale(params.cameraV, screenY)
         ));
         float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
-        float3 radiance = make_float3(0.0f, 0.0f, 0.0f);
+        float3 directRadiance = zeroVector();
+        float3 indirectRadiance = zeroVector();
 
         // Each loop iteration traces one path segment. Keeping the loop here
         // means the OptiX pipeline itself only requires a trace depth of one.
@@ -256,25 +375,55 @@ extern "C" __global__ void __raygen__render()
 
             if (!payload.hit) {
                 // A miss terminates the path with environment radiance.
-                radiance = add(
-                    radiance,
-                    multiply(throughput, params.environmentColor)
+                const float3 environmentContribution = multiply(
+                    throughput,
+                    params.environmentColor
                 );
+                if (depth == 0) {
+                    directRadiance = add(
+                        directRadiance,
+                        environmentContribution
+                    );
+                } else {
+                    indirectRadiance = add(
+                        indirectRadiance,
+                        environmentContribution
+                    );
+                }
                 break;
             }
 
             if (largestComponent(payload.material.emission) > 0.0f) {
-                // Emissive geometry contributes light when a random path finds it.
-                radiance = add(
-                    radiance,
-                    multiply(throughput, payload.material.emission)
-                );
+                // Without MIS, only camera-visible emission is accumulated here.
+                // Diffuse paths reaching a light are already represented by the
+                // explicit area-light sample taken at the previous surface.
+                if (depth == 0) {
+                    directRadiance = add(
+                        directRadiance,
+                        multiply(throughput, payload.material.emission)
+                    );
+                }
                 break;
             }
 
             float3 surfaceNormal = payload.normal;
             if (dot(surfaceNormal, rayDirection) > 0.0f) {
                 surfaceNormal = scale(surfaceNormal, -1.0f);
+            }
+
+            const float3 sampledDirectLight = multiply(
+                throughput,
+                estimateDirectLighting(
+                    payload.position,
+                    surfaceNormal,
+                    payload.material.albedo,
+                    randomState
+                )
+            );
+            if (depth == 0) {
+                directRadiance = add(directRadiance, sampledDirectLight);
+            } else {
+                indirectRadiance = add(indirectRadiance, sampledDirectLight);
             }
 
             throughput = multiply(throughput, payload.material.albedo);
@@ -301,7 +450,10 @@ extern "C" __global__ void __raygen__render()
             }
         }
 
-        accumulatedRadiance = add(accumulatedRadiance, radiance);
+        accumulatedRadiance = add(
+            accumulatedRadiance,
+            add(directRadiance, indirectRadiance)
+        );
     }
 
     const float inverseSampleCount = 1.0f / params.samplesPerPixel;
@@ -328,6 +480,17 @@ extern "C" __global__ void __miss__radiance()
         optixGetPayload_1()
     ));
     payload->hit = false;
+}
+
+extern "C" __global__ void __miss__shadow()
+{
+    // The visibility payload starts at one and remains unchanged on a miss.
+}
+
+extern "C" __global__ void __anyhit__shadow()
+{
+    optixSetPayload_0(0);
+    optixTerminateRay();
 }
 
 extern "C" __global__ void __closesthit__radiance()

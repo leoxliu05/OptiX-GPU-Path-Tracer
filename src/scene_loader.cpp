@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cmath>
 #include <fstream>
 #include <stdexcept>
 #include <string>
@@ -12,6 +13,80 @@
 namespace {
 
 using json = nlohmann::json;
+
+float3 subtract(float3 first, float3 second)
+{
+    return make_float3(
+        first.x - second.x,
+        first.y - second.y,
+        first.z - second.z
+    );
+}
+
+float3 cross(float3 first, float3 second)
+{
+    return make_float3(
+        first.y * second.z - first.z * second.y,
+        first.z * second.x - first.x * second.z,
+        first.x * second.y - first.y * second.x
+    );
+}
+
+float length(float3 value)
+{
+    return std::sqrt(
+        value.x * value.x + value.y * value.y + value.z * value.z
+    );
+}
+
+bool isEmissive(const materialData& material)
+{
+    return material.emission.x > 0.0f ||
+        material.emission.y > 0.0f ||
+        material.emission.z > 0.0f;
+}
+
+// Register every emissive triangle as an area light. Sampling all triangles in
+// proportion to their area produces the combined PDF 1 / totalLightArea.
+void appendAreaLights(
+    sceneData& scene,
+    const std::vector<float3>& vertices,
+    const materialData& material
+)
+{
+    if (!isEmissive(material)) {
+        return;
+    }
+
+    for (std::size_t index = 0; index < vertices.size(); index += 3) {
+        const float3 firstVertex = vertices[index];
+        const float3 secondVertex = vertices[index + 1];
+        const float3 thirdVertex = vertices[index + 2];
+        const float3 unnormalizedNormal = cross(
+            subtract(secondVertex, firstVertex),
+            subtract(thirdVertex, firstVertex)
+        );
+        const float doubleArea = length(unnormalizedNormal);
+        if (doubleArea <= 0.0f) {
+            continue;
+        }
+
+        const float area = 0.5f * doubleArea;
+        scene.lights.push_back(areaLightData{
+            firstVertex,
+            secondVertex,
+            thirdVertex,
+            make_float3(
+                unnormalizedNormal.x / doubleArea,
+                unnormalizedNormal.y / doubleArea,
+                unnormalizedNormal.z / doubleArea
+            ),
+            material.emission,
+            area
+        });
+        scene.totalLightArea += area;
+    }
+}
 
 // Centralize vector validation so malformed JSON reports the field that failed.
 float3 readFloat3(const json& value, const std::string& fieldName)
@@ -135,6 +210,11 @@ sceneData loadScene(const std::filesystem::path& scenePath)
         const std::vector<float3> meshVertices = loadObjTriangles(
             sceneDirectory / mesh.at("path").get<std::string>(),
             combineTransforms(rootTransform, meshTransform)
+        );
+        appendAreaLights(
+            scene,
+            meshVertices,
+            scene.materials[materialIterator->second]
         );
         scene.vertices.insert(
             scene.vertices.end(),

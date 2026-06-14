@@ -2,7 +2,7 @@
   "renderer": {
     "width": 784,
     "height": 784,
-    "samplesPerPixel": 512,
+    "samplesPerPixel": 256,
     "maxDepth": 8,
     "seed": 305419896,
     "output": "output/cornellbox/cornellbox.ppm"
