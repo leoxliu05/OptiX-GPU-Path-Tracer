@@ -1,0 +1,48 @@
+{
+  "renderer": {
+    "width": 784,
+    "height": 784,
+    "samplesPerPixel": 512,
+    "maxDepth": 8,
+    "seed": 305419896,
+    "output": "cornellbox.ppm"
+  },
+  "camera": {
+    "position": [0.0, 0.0, -8.1],
+    "target": [0.0, -0.15, 0.15],
+    "up": [0.0, 1.0, 0.0],
+    "verticalFovDegrees": 50.0
+  },
+  "environmentColor": [0.0, 0.0, 0.0],
+  "rootTransform": {
+    "scale": [0.01, 0.01, 0.01],
+    "translation": [-2.78, -2.744, -2.796]
+  },
+  "materials": [
+    {
+      "name": "white",
+      "albedo": [0.73, 0.71, 0.68]
+    },
+    {
+      "name": "red",
+      "albedo": [0.63, 0.055, 0.04]
+    },
+    {
+      "name": "green",
+      "albedo": [0.12, 0.45, 0.15]
+    },
+    {
+      "name": "light",
+      "albedo": [1.0, 1.0, 1.0],
+      "emission": [18.0, 15.0, 11.0]
+    }
+  ],
+  "meshes": [
+    { "path": "floor.obj", "material": "white" },
+    { "path": "right.obj", "material": "red" },
+    { "path": "left.obj", "material": "green" },
+    { "path": "shortbox.obj", "material": "white" },
+    { "path": "tallbox.obj", "material": "white" },
+    { "path": "light.obj", "material": "light" }
+  ]
+}

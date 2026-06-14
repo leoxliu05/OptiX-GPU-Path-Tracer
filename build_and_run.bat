@@ -35,9 +35,8 @@ if not exist build\build.ninja (
 "%CMAKE%" --build build
 if errorlevel 1 exit /b %errorlevel%
 
-build\optix_triangle.exe optix_triangle.ppm
+build\optix_path_tracer.exe model\cornellbox\scene.json
 set "RESULT=%errorlevel%"
 
 popd
 exit /b %RESULT%
-

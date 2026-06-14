@@ -30,7 +30,7 @@ if(NOT OPTIX_INCLUDE_DIR)
     )
 endif()
 
-set(DEVICE_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/device/device.cu")
+set(DEVICE_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/device/device.cu")
 set(DEVICE_PTX "${CMAKE_CURRENT_BINARY_DIR}/device.ptx")
 
 add_custom_command(
@@ -46,38 +46,43 @@ add_custom_command(
         "${DEVICE_SOURCE}"
     DEPENDS
         "${DEVICE_SOURCE}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/include/LaunchParams.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include/optix_path_tracer/shared_types.h"
     VERBATIM
 )
 
 add_custom_target(optix_device_ptx DEPENDS "${DEVICE_PTX}")
 
 add_executable(
-    optix_triangle
+    optix_path_tracer
+    src/image_writer.cpp
     src/main.cpp
+    src/obj_loader.cpp
+    src/optix_renderer.cpp
     src/optix_function_table.cpp
+    src/scene_loader.cpp
 )
 
-add_dependencies(optix_triangle optix_device_ptx)
+add_dependencies(optix_path_tracer optix_device_ptx)
 
 target_include_directories(
-    optix_triangle
+    optix_path_tracer
     PRIVATE
         "${OPTIX_INCLUDE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/json/single_include"
 )
 
 target_link_libraries(
-    optix_triangle
+    optix_path_tracer
     PRIVATE
         CUDA::cudart
         CUDA::cuda_driver
 )
 
 add_custom_command(
-    TARGET optix_triangle POST_BUILD
+    TARGET optix_path_tracer POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
         "${DEVICE_PTX}"
-        "$<TARGET_FILE_DIR:optix_triangle>/device.ptx"
+        "$<TARGET_FILE_DIR:optix_path_tracer>/device.ptx"
     VERBATIM
 )
