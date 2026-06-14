@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 
+// Convert CUDA error codes into exceptions with operation-specific context.
 inline void checkCuda(cudaError_t result, const char* operation)
 {
     if (result != cudaSuccess) {
@@ -15,6 +16,7 @@ inline void checkCuda(cudaError_t result, const char* operation)
     }
 }
 
+// Keep OptiX error handling consistent with the CUDA error path above.
 inline void checkOptix(OptixResult result, const char* operation)
 {
     if (result != OPTIX_SUCCESS) {
@@ -23,4 +25,3 @@ inline void checkOptix(OptixResult result, const char* operation)
         );
     }
 }
-

@@ -23,6 +23,8 @@
 
 namespace {
 
+// Every SBT record starts with an OptiX-generated header followed by data that
+// becomes available through optixGetSbtDataPointer() on the device.
 template <typename dataType>
 struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) sbtRecord
 {
@@ -34,6 +36,8 @@ struct emptySbtData
 {
 };
 
+// Own the OptiX objects created for one render. Destruction happens in reverse
+// dependency order when renderScene returns or throws an exception.
 struct optixResources
 {
     OptixDeviceContext context = nullptr;
@@ -76,6 +80,7 @@ void logOptixMessage(
     std::cerr << "[OptiX][" << level << "][" << tag << "] " << message;
 }
 
+// PTX is text consumed by optixModuleCreate at runtime.
 std::string readTextFile(const std::filesystem::path& path)
 {
     std::ifstream input(path, std::ios::binary);
@@ -94,6 +99,8 @@ OptixModule createModule(
     const std::string& ptx
 )
 {
+    // Preserve the compiler log even on success because it can contain useful
+    // stack or optimization diagnostics.
     OptixModule module = nullptr;
     std::array<char, 4096> log{};
     std::size_t logSize = log.size();
@@ -119,6 +126,7 @@ OptixProgramGroup createProgramGroup(
     const OptixProgramGroupDesc& description
 )
 {
+    // A program group associates one OptiX stage with an entry point from PTX.
     OptixProgramGroupOptions options{};
     OptixProgramGroup group = nullptr;
     std::array<char, 4096> log{};
@@ -152,6 +160,9 @@ void createPipeline(optixResources& resources, const std::string& ptx)
 #endif
 
     OptixPipelineCompileOptions pipelineOptions{};
+
+    // The current scene builds one geometry acceleration structure and uses two
+    // payload registers to carry a 64-bit pathPayload pointer.
     pipelineOptions.traversableGraphFlags =
         OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS;
     pipelineOptions.numPayloadValues = 2;
@@ -168,6 +179,7 @@ void createPipeline(optixResources& resources, const std::string& ptx)
         ptx
     );
 
+    // Register the three device entry points used by the single radiance ray type.
     OptixProgramGroupDesc raygenDescription{};
     raygenDescription.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
     raygenDescription.raygen.module = resources.module;
@@ -200,6 +212,9 @@ void createPipeline(optixResources& resources, const std::string& ptx)
         resources.missGroup,
         resources.hitGroup
     };
+
+    // Paths are iterated inside raygen, so each optixTrace call only needs one
+    // level of OptiX continuation depth.
     OptixPipelineLinkOptions linkOptions{};
     linkOptions.maxTraceDepth = 1;
     std::array<char, 4096> log{};
@@ -219,6 +234,7 @@ void createPipeline(optixResources& resources, const std::string& ptx)
     }
     checkOptix(pipelineResult, "optixPipelineCreate");
 
+    // OptiX requires explicit stack sizing after all program groups are linked.
     OptixStackSizes stackSizes{};
     for (OptixProgramGroup group : groups) {
         checkOptix(
@@ -259,6 +275,8 @@ launchParams createLaunchParams(
     OptixTraversableHandle traversable
 )
 {
+    // Convert the camera look-at description into a scaled orthonormal basis.
+    // Device code combines W + screenX * U + screenY * V for each primary ray.
     const float3 cameraForward = normalize(subtract(
         scene.camera.target,
         scene.camera.position
@@ -300,9 +318,12 @@ renderResult renderScene(
     const std::filesystem::path& ptxPath
 )
 {
+    // cudaFree(nullptr) initializes the CUDA runtime without allocating memory.
     checkCuda(cudaFree(nullptr), "initialize CUDA runtime");
     checkOptix(optixInit(), "optixInit");
 
+    // The context targets the current CUDA device. Debug builds enable OptiX
+    // validation to report invalid pipeline and acceleration-structure usage.
     optixResources resources;
     OptixDeviceContextOptions contextOptions{};
     contextOptions.logCallbackFunction = logOptixMessage;
@@ -318,6 +339,7 @@ renderResult renderScene(
     );
     createPipeline(resources, readTextFile(ptxPath));
 
+    // Upload the flat world-space triangle array produced by the OBJ loader.
     cudaBuffer<float3> deviceVertices;
     deviceVertices.allocate(scene.vertices.size());
     checkCuda(
@@ -330,6 +352,7 @@ renderResult renderScene(
         "copy scene vertices"
     );
 
+    // Each triangle stores an SBT record index selecting its material.
     cudaBuffer<std::uint32_t> deviceMaterialIndices;
     deviceMaterialIndices.allocate(scene.materialIndices.size());
     checkCuda(
@@ -342,6 +365,8 @@ renderResult renderScene(
         "copy material indices"
     );
 
+    // Describe one non-indexed triangle build input. Vertices 0..2 form the
+    // first primitive, vertices 3..5 form the second, and so on.
     const CUdeviceptr vertexPointer = deviceVertices.devicePointer();
     const std::vector<unsigned int> geometryFlags(
         scene.materials.size(),
@@ -362,6 +387,8 @@ renderResult renderScene(
     buildInput.triangleArray.sbtIndexOffsetSizeInBytes = sizeof(std::uint32_t);
     buildInput.triangleArray.sbtIndexOffsetStrideInBytes = sizeof(std::uint32_t);
 
+    // Query allocation sizes before building the geometry acceleration
+    // structure (GAS). Scratch memory is temporary; output memory owns the BVH.
     OptixAccelBuildOptions accelerationOptions{};
     accelerationOptions.buildFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
     accelerationOptions.operation = OPTIX_BUILD_OPERATION_BUILD;
@@ -400,6 +427,8 @@ renderResult renderScene(
         "optixAccelBuild"
     );
 
+    // Raygen and miss records only identify programs. Hit records additionally
+    // bind the shared vertex buffer and one material to the closest-hit program.
     sbtRecord<emptySbtData> raygenRecord{};
     sbtRecord<emptySbtData> missRecord{};
     checkOptix(
@@ -421,6 +450,7 @@ renderResult renderScene(
         hitRecords[index].data.material = scene.materials[index];
     }
 
+    // SBT records must live in device memory for the duration of optixLaunch.
     cudaBuffer<sbtRecord<emptySbtData>> deviceRaygenRecord;
     cudaBuffer<sbtRecord<emptySbtData>> deviceMissRecord;
     cudaBuffer<sbtRecord<hitGroupData>> deviceHitRecords;
@@ -455,6 +485,7 @@ renderResult renderScene(
         "copy hit group SBT records"
     );
 
+    // The SBT connects the pipeline stages to the records selected by a trace.
     OptixShaderBindingTable shaderBindingTable{};
     shaderBindingTable.raygenRecord = deviceRaygenRecord.devicePointer();
     shaderBindingTable.missRecordBase = deviceMissRecord.devicePointer();
@@ -466,6 +497,8 @@ renderResult renderScene(
     shaderBindingTable.hitgroupRecordCount =
         static_cast<unsigned int>(hitRecords.size());
 
+    // Allocate the output image and copy the camera, render settings, and GAS
+    // handle into the launch parameter block consumed by device.cu.
     const std::size_t pixelCount =
         static_cast<std::size_t>(scene.renderer.width) * scene.renderer.height;
     cudaBuffer<uchar4> devicePixels;
@@ -487,6 +520,8 @@ renderResult renderScene(
         "copy launch parameters"
     );
 
+    // Launch one ray-generation invocation per pixel. All samples and path
+    // bounces for that pixel are evaluated inside the device program.
     checkOptix(
         optixLaunch(
             resources.pipeline,
@@ -502,6 +537,8 @@ renderResult renderScene(
     );
     checkCuda(cudaDeviceSynchronize(), "wait for OptiX launch");
 
+    // Return an owning host copy so all temporary CUDA and OptiX resources can
+    // be released when this function exits.
     renderResult result;
     result.width = scene.renderer.width;
     result.height = scene.renderer.height;

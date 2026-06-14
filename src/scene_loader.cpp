@@ -13,6 +13,7 @@ namespace {
 
 using json = nlohmann::json;
 
+// Centralize vector validation so malformed JSON reports the field that failed.
 float3 readFloat3(const json& value, const std::string& fieldName)
 {
     if (!value.is_array() || value.size() != 3) {
@@ -25,6 +26,7 @@ float3 readFloat3(const json& value, const std::string& fieldName)
     );
 }
 
+// Missing transform members retain their identity defaults.
 objectTransform readTransform(const json& value)
 {
     objectTransform transform;
@@ -40,6 +42,7 @@ objectTransform readTransform(const json& value)
     return transform;
 }
 
+// Compose child scale and translation with the scene-wide root transform.
 objectTransform combineTransforms(
     const objectTransform& parent,
     const objectTransform& child
@@ -72,6 +75,8 @@ sceneData loadScene(const std::filesystem::path& scenePath)
     input >> document;
     sceneData scene;
 
+    // Rendering and camera settings stay in JSON so the host code is not tied
+    // to the bundled Cornell Box scene.
     const json& renderer = document.at("renderer");
     scene.renderer.width = renderer.at("width").get<unsigned int>();
     scene.renderer.height = renderer.at("height").get<unsigned int>();
@@ -91,6 +96,8 @@ sceneData loadScene(const std::filesystem::path& scenePath)
         "environmentColor"
     );
 
+    // Material names are convenient in JSON, while OptiX SBT records use dense
+    // integer indices. Build that mapping once during scene loading.
     std::unordered_map<std::string, std::uint32_t> materialLookup;
     for (const json& material : document.at("materials")) {
         const std::string name = material.at("name").get<std::string>();
@@ -122,6 +129,9 @@ sceneData loadScene(const std::filesystem::path& scenePath)
         const objectTransform meshTransform = mesh.contains("transform")
             ? readTransform(mesh.at("transform"))
             : objectTransform{};
+
+        // Resolve mesh paths relative to the JSON file so complete scene
+        // folders can be moved without changing their contents.
         const std::vector<float3> meshVertices = loadObjTriangles(
             sceneDirectory / mesh.at("path").get<std::string>(),
             combineTransforms(rootTransform, meshTransform)
@@ -131,6 +141,9 @@ sceneData loadScene(const std::filesystem::path& scenePath)
             meshVertices.begin(),
             meshVertices.end()
         );
+
+        // One material index is stored per triangle, not per vertex. OptiX uses
+        // this buffer to select the corresponding hit-group SBT record.
         scene.materialIndices.insert(
             scene.materialIndices.end(),
             meshVertices.size() / 3,

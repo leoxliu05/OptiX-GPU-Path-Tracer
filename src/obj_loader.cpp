@@ -7,6 +7,8 @@
 
 namespace {
 
+// Apply the limited scale-and-translation transform while loading vertices so
+// the renderer only needs one world-space vertex buffer.
 float3 applyTransform(float3 vertex, const objectTransform& transform)
 {
     return make_float3(
@@ -16,6 +18,8 @@ float3 applyTransform(float3 vertex, const objectTransform& transform)
     );
 }
 
+// OBJ indices are one-based and may be negative. Texture-coordinate and normal
+// suffixes are ignored because the current renderer only needs positions.
 std::size_t parseVertexIndex(const std::string& token, std::size_t vertexCount)
 {
     const std::size_t slashPosition = token.find('/');
@@ -50,6 +54,8 @@ std::vector<float3> loadObjTriangles(
         lineStream >> recordType;
 
         if (recordType == "v") {
+            // Transform each position once instead of repeating the operation
+            // for every ray intersection on the GPU.
             float3 vertex{};
             lineStream >> vertex.x >> vertex.y >> vertex.z;
             positions.push_back(applyTransform(vertex, transform));
@@ -69,6 +75,7 @@ std::vector<float3> loadObjTriangles(
             throw std::runtime_error("OBJ face has fewer than three vertices: " + path.string());
         }
 
+        // Convert an arbitrary polygon into a triangle fan rooted at vertex 0.
         for (std::size_t index = 1; index + 1 < faceIndices.size(); ++index) {
             triangles.push_back(positions[faceIndices[0]]);
             triangles.push_back(positions[faceIndices[index]]);

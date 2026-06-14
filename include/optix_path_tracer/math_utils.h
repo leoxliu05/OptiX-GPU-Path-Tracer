@@ -4,6 +4,7 @@
 
 #include <cmath>
 
+// Small host-side float3 helpers used to construct the camera basis.
 inline float3 subtract(float3 first, float3 second)
 {
     return make_float3(
@@ -36,4 +37,3 @@ inline float3 normalize(float3 value)
 {
     return multiply(value, 1.0f / std::sqrt(dot(value, value)));
 }
-

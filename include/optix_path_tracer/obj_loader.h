@@ -5,14 +5,15 @@
 #include <filesystem>
 #include <vector>
 
+// Object-space transform supported by the current scene format.
 struct objectTransform
 {
     float3 scale = make_float3(1.0f, 1.0f, 1.0f);
     float3 translation = make_float3(0.0f, 0.0f, 0.0f);
 };
 
+// Load OBJ faces, triangulate them, and return a flat triangle vertex array.
 std::vector<float3> loadObjTriangles(
     const std::filesystem::path& path,
     const objectTransform& transform
 );
-

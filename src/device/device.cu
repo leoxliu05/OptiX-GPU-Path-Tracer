@@ -3,6 +3,8 @@
 
 #include "optix_path_tracer/shared_types.h"
 
+// OptiX binds this constant-memory symbol to the launch parameter buffer named
+// by pipelineLaunchParamsVariableName on the host.
 extern "C" {
 __constant__ launchParams params;
 }
@@ -11,6 +13,8 @@ namespace {
 
 constexpr float pi = 3.14159265358979323846f;
 
+// A trace writes its closest-hit result into this caller-owned payload. The
+// pointer is transported through two 32-bit OptiX payload registers.
 struct pathPayload
 {
     bool hit;
@@ -85,6 +89,8 @@ static __forceinline__ __device__ unsigned int hash(unsigned int value)
     return value;
 }
 
+// Lightweight per-pixel pseudo-random number generator. It is sufficient for
+// this baseline renderer but can later be replaced by a higher-quality sampler.
 static __forceinline__ __device__ float randomFloat(unsigned int& state)
 {
     state = 1664525u * state + 1013904223u;
@@ -96,6 +102,8 @@ static __forceinline__ __device__ float3 localToWorld(
     float3 normal
 )
 {
+    // Build an orthonormal basis around the shading normal. Selecting a helper
+    // axis that is not parallel to the normal avoids a degenerate cross product.
     const float3 helper = fabsf(normal.z) < 0.999f
         ? make_float3(0.0f, 0.0f, 1.0f)
         : make_float3(1.0f, 0.0f, 0.0f);
@@ -115,6 +123,8 @@ static __forceinline__ __device__ float3 sampleCosineHemisphere(
     unsigned int& randomState
 )
 {
+    // Mapping a uniform square sample to a cosine-weighted hemisphere matches
+    // the Lambertian BRDF, so its BRDF and PDF terms cancel in throughput.
     const float firstSample = randomFloat(randomState);
     const float secondSample = randomFloat(randomState);
     const float radius = sqrtf(firstSample);
@@ -135,6 +145,7 @@ static __forceinline__ __device__ void packPointer(
     unsigned int& secondPayload
 )
 {
+    // OptiX payload registers are 32-bit, while device pointers are 64-bit.
     const unsigned long long pointerValue =
         reinterpret_cast<unsigned long long>(pointer);
     firstPayload = static_cast<unsigned int>(pointerValue);
@@ -161,6 +172,9 @@ static __forceinline__ __device__ void traceRay(
     unsigned int firstPayload;
     unsigned int secondPayload;
     packPointer(&payload, firstPayload, secondPayload);
+
+    // The SBT offset/stride/miss values select ray type zero. This renderer has
+    // a single radiance ray type and performs path iteration in raygen.
     optixTrace(
         params.traversable,
         origin,
@@ -180,6 +194,7 @@ static __forceinline__ __device__ void traceRay(
 
 static __forceinline__ __device__ float3 toneMap(float3 color)
 {
+    // ACES-style fitted curve compresses HDR radiance into display range.
     const float first = 2.51f;
     const float second = 0.03f;
     const float third = 2.43f;
@@ -205,6 +220,7 @@ static __forceinline__ __device__ unsigned char toByte(float value)
 
 extern "C" __global__ void __raygen__render()
 {
+    // OptiX launches one ray-generation invocation for each output pixel.
     const uint3 launchIndex = optixGetLaunchIndex();
     const unsigned int pixelIndex =
         launchIndex.y * params.width + launchIndex.x;
@@ -214,6 +230,7 @@ extern "C" __global__ void __raygen__render()
     for (unsigned int sampleIndex = 0;
          sampleIndex < params.samplesPerPixel;
          ++sampleIndex) {
+        // Jitter the sample inside the pixel to perform stochastic anti-aliasing.
         const float screenX =
             2.0f * (static_cast<float>(launchIndex.x) + randomFloat(randomState)) /
                 params.width -
@@ -231,11 +248,14 @@ extern "C" __global__ void __raygen__render()
         float3 throughput = make_float3(1.0f, 1.0f, 1.0f);
         float3 radiance = make_float3(0.0f, 0.0f, 0.0f);
 
+        // Each loop iteration traces one path segment. Keeping the loop here
+        // means the OptiX pipeline itself only requires a trace depth of one.
         for (unsigned int depth = 0; depth < params.maxDepth; ++depth) {
             pathPayload payload{};
             traceRay(rayOrigin, rayDirection, payload);
 
             if (!payload.hit) {
+                // A miss terminates the path with environment radiance.
                 radiance = add(
                     radiance,
                     multiply(throughput, params.environmentColor)
@@ -244,6 +264,7 @@ extern "C" __global__ void __raygen__render()
             }
 
             if (largestComponent(payload.material.emission) > 0.0f) {
+                // Emissive geometry contributes light when a random path finds it.
                 radiance = add(
                     radiance,
                     multiply(throughput, payload.material.emission)
@@ -257,10 +278,15 @@ extern "C" __global__ void __raygen__render()
             }
 
             throughput = multiply(throughput, payload.material.albedo);
+
+            // Offset the next origin to avoid immediately hitting the same
+            // triangle because of floating-point intersection error.
             rayOrigin = add(payload.position, scale(surfaceNormal, 0.001f));
             rayDirection = sampleCosineHemisphere(surfaceNormal, randomState);
 
             if (depth >= 3) {
+                // Russian roulette terminates low-throughput paths without
+                // bias. Surviving paths are reweighted by the inverse chance.
                 const float survivalProbability = fminf(
                     largestComponent(throughput),
                     0.95f
@@ -279,6 +305,8 @@ extern "C" __global__ void __raygen__render()
     }
 
     const float inverseSampleCount = 1.0f / params.samplesPerPixel;
+
+    // Average all Monte Carlo samples before tone mapping and gamma conversion.
     const float3 finalColor = toneMap(scale(
         accumulatedRadiance,
         inverseSampleCount
@@ -293,6 +321,8 @@ extern "C" __global__ void __raygen__render()
 
 extern "C" __global__ void __miss__radiance()
 {
+    // The ray-generation loop handles environment lighting after observing this
+    // flag, which keeps the miss program independent of integrator policy.
     pathPayload* payload = reinterpret_cast<pathPayload*>(unpackPointer(
         optixGetPayload_0(),
         optixGetPayload_1()
@@ -309,6 +339,9 @@ extern "C" __global__ void __closesthit__radiance()
     const hitGroupData* groupData = reinterpret_cast<const hitGroupData*>(
         optixGetSbtDataPointer()
     );
+
+    // Primitive indices address the flat, non-indexed triangle array uploaded
+    // by the host. Each primitive therefore occupies three consecutive vertices.
     const unsigned int primitiveIndex = optixGetPrimitiveIndex();
     const float3 firstVertex = groupData->vertices[primitiveIndex * 3 + 0];
     const float3 secondVertex = groupData->vertices[primitiveIndex * 3 + 1];
@@ -321,6 +354,8 @@ extern "C" __global__ void __closesthit__radiance()
         rayOrigin,
         scale(rayDirection, optixGetRayTmax())
     );
+
+    // Geometry normals are sufficient for the current flat-shaded OBJ scenes.
     payload->normal = normalize(cross(
         subtract(secondVertex, firstVertex),
         subtract(thirdVertex, firstVertex)

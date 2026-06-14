@@ -9,6 +9,7 @@
 
 #include "optix_path_tracer/shared_types.h"
 
+// Rendering controls read from the renderer section of scene.json.
 struct renderSettings
 {
     unsigned int width = 512;
@@ -19,6 +20,7 @@ struct renderSettings
     std::filesystem::path outputPath = "render.ppm";
 };
 
+// Pinhole camera parameters expressed in world space.
 struct cameraSettings
 {
     float3 position{};
@@ -27,6 +29,8 @@ struct cameraSettings
     float verticalFovDegrees = 45.0f;
 };
 
+// Fully loaded scene consumed by the renderer. OBJ meshes are flattened into
+// triangles, and each triangle has a matching material index.
 struct sceneData
 {
     renderSettings renderer;

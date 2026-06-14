@@ -10,6 +10,8 @@ void writePpm(
     unsigned int height
 )
 {
+    // Scene files may select nested output paths. Create the complete parent
+    // hierarchy before opening the image file.
     const std::filesystem::path outputDirectory = outputPath.parent_path();
     if (!outputDirectory.empty()) {
         std::error_code directoryError;
@@ -30,6 +32,7 @@ void writePpm(
         );
     }
 
+    // P6 stores the RGB channels as raw bytes after a short ASCII header.
     output << "P6\n" << width << ' ' << height << "\n255\n";
     for (const uchar4 pixel : pixels) {
         output.put(static_cast<char>(pixel.x));
