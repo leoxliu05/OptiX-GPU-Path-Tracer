@@ -1,7 +1,6 @@
 # OptiX GPU Path Tracer
 
-A small, scene-driven NVIDIA OptiX path tracer. Rendering code is independent
-of the bundled Cornell Box: scene assets, materials, camera settings, image
+A small NVIDIA OptiX path tracer: scene assets, materials, camera settings, image
 dimensions, sampling, and output paths are configured in JSON.
 
 ## Current Renderer
